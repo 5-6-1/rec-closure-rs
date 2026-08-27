@@ -1,7 +1,10 @@
 //! Path selection and the `fn` / inferred (Rc) expansions.
 
 use proc_macro2::Ident;
-use syn::{ExprClosure, Pat, ReturnType, Stmt, Type, parse_quote};
+use syn::{
+    ExprClosure, Pat, ReturnType, Stmt, Type, parse_quote,
+    visit::{self, Visit},
+};
 
 use crate::{
     Ctx,
@@ -51,6 +54,55 @@ fn typed_args(closure: &ExprClosure) -> Option<TypedArgs> {
 // path selection
 // ---------------------------------------------------------------------------
 
+/// How an annotated return type uses elided (anonymous) reference lifetimes:
+/// not at all, as a plain top-level reference (`&str`, whose elision the
+/// inferred store can resolve), or nested inside a container (`Option<&str>`)
+/// where neither expansion path can express it.
+enum RetRef {
+    None,
+    TopLevel,
+    Nested,
+}
+
+fn ret_elided_ref(ret: &Type) -> RetRef {
+    match ret {
+        Type::Reference(r) if r.lifetime.is_none() => {
+            if type_has_elided_ref(&r.elem) {
+                RetRef::Nested
+            } else {
+                RetRef::TopLevel
+            }
+        }
+        other => {
+            if type_has_elided_ref(other) {
+                RetRef::Nested
+            } else {
+                RetRef::None
+            }
+        }
+    }
+}
+
+/// Whether any reference with an elided lifetime occurs anywhere in `ty`.
+fn type_has_elided_ref(ty: &Type) -> bool {
+    let mut v = ElidedRefFinder { found: false };
+    v.visit_type(ty);
+    v.found
+}
+
+struct ElidedRefFinder {
+    found: bool,
+}
+
+impl<'a> Visit<'a> for ElidedRefFinder {
+    fn visit_type_reference(&mut self, ty: &'a syn::TypeReference) {
+        if ty.lifetime.is_none() {
+            self.found = true;
+        }
+        visit::visit_type_reference(self, ty);
+    }
+}
+
 pub(crate) fn expand_closure(
     name: &Ident, closure: &ExprClosure, ctx: &mut Ctx,
 ) -> syn::Result<Vec<Stmt>> {
@@ -74,19 +126,49 @@ pub(crate) fn expand_closure(
 
     ctx.active.push(name.clone());
     let result = match typed_args(closure) {
-        // Fully annotated and captures nothing: a plain local `fn` is the
-        // best possible lowering (static call, no dynamic dispatch at all).
-        Some(ta) if !captures_external(closure, name) => expand_fn(name, closure, &ta, ctx),
-        // An elided reference return (`&str -> &str`) cannot be expressed in
-        // the zero-allocation `Fn(&dyn HideFn, ...) -> ...` bound (E0106:
-        // the elision rule picks `&dyn HideFn`); the inferred store erases
-        // the return as `_`, which resolves correctly. Route there.
-        Some(ta) if matches!(ta.ret, Type::Reference(_)) => expand_inferred(name, closure, n, ctx),
-        Some(ta) => expand_zero_alloc(name, closure, &ta, n, ctx),
-        None => expand_inferred(name, closure, n, ctx),
+        Some(ta) => match ret_elided_ref(&ta.ret) {
+            // Container-nested elided references (`Option<&str>`) cannot be
+            // expressed by any expansion path (zero-alloc: E0106 in the `Fn`
+            // bound; inferred: the `_` return is polluted by constructor
+            // argument inference). Refuse with a hint.
+            RetRef::Nested => Err(syn::Error::new_spanned(
+                closure,
+                "the return type contains references with elided lifetimes \
+                 nested inside a container (e.g. `Option<&str>`); use explicit \
+                 lifetimes such as `Option<&'static str>`",
+            )),
+            // A plain top-level reference return (`&str`) cannot go through
+            // the zero-alloc `Fn(&dyn HideFn, ...) -> ...` bound (E0106, the
+            // elision rule picks `&dyn HideFn`), and the inferred `_` return
+            // can only resolve it when there is exactly one reference input
+            // (the sole lifetime to borrow from). Any other shape — multiple
+            // or zero reference inputs — is refused with a hint.
+            RetRef::TopLevel => {
+                let ref_params = ta.tys.iter().filter(|t| matches!(t, Type::Reference(_))).count();
+                if ref_params == 1 {
+                    Ok(expand_inferred(name, closure, n, ctx))
+                } else {
+                    Err(syn::Error::new_spanned(
+                        closure,
+                        "an elided reference return (`-> &str`) needs exactly one \
+                         reference parameter to borrow from; use explicit \
+                         lifetimes such as `-> &'static str`",
+                    ))
+                }
+            }
+            // No elided reference in the return: normal path selection.
+            RetRef::None => {
+                if !captures_external(closure, name) {
+                    Ok(expand_fn(name, closure, &ta, ctx))
+                } else {
+                    Ok(expand_zero_alloc(name, closure, &ta, n, ctx))
+                }
+            }
+        },
+        None => Ok(expand_inferred(name, closure, n, ctx)),
     };
     ctx.active.pop();
-    Ok(result)
+    result
 }
 
 // ---------------------------------------------------------------------------

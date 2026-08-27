@@ -75,3 +75,19 @@ fn for_loop_and_if_let_capture_order() {
     };
     assert_eq!(f(0), 1 + 2 + 3 + 1);
 }
+
+#[rec_closure]
+#[test]
+fn same_name_inside_nested_fn_item() {
+    // A nested `fn` is an independent scope: a recursive closure inside it
+    // may reuse the outer closure's name without being rejected.
+    let f = |n: i32| -> i32 {
+        fn helper() -> i32 {
+            let f = |m: i32| -> i32 { if m <= 1 { 1 } else { m * f(m - 1) } };
+            f(3)
+        }
+        if n <= 1 { 1 } else { n * f(n - 1) + helper() }
+    };
+    // helper() = 3! = 6; f(1)=1, f(2)=2*1+6=8, f(3)=3*8+6=30
+    assert_eq!(f(3), 30);
+}

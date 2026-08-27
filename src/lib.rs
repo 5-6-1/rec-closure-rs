@@ -100,6 +100,15 @@ impl VisitMut for Ctx {
         expand_stmts(&mut block.stmts, self);
         visit_mut::visit_block_mut(self, block);
     }
+
+    fn visit_item_fn_mut(&mut self, node: &mut ItemFn) {
+        // A nested `fn` is an independent scope (it cannot capture the outer
+        // bindings): a recursive closure inside it may reuse an enclosing
+        // closure's name, so the active-names stack must not leak in.
+        let saved = std::mem::take(&mut self.active);
+        visit_mut::visit_item_fn_mut(self, node);
+        self.active = saved;
+    }
 }
 
 impl Ctx {

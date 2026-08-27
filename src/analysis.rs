@@ -17,6 +17,12 @@ pub(crate) fn single_ident(path: &syn::Path) -> Option<&Ident> {
     (path.segments.len() == 1).then(|| &path.segments[0].ident)
 }
 
+/// Standard enum constructors / built-ins that never denote a captured
+/// variable (shadowing them is pathological).
+fn is_known_ctor(id: &Ident) -> bool {
+    matches!(id.to_string().as_str(), "Some" | "None" | "Ok" | "Err")
+}
+
 // ---------------------------------------------------------------------------
 // recursion detection
 // ---------------------------------------------------------------------------
@@ -70,6 +76,7 @@ impl<'a> Visit<'a> for CaptureScanner<'a> {
     fn visit_expr_path(&mut self, p: &'a syn::ExprPath) {
         if let Some(id) = single_ident(&p.path)
             && !self.bound.contains(id)
+            && !is_known_ctor(id)
         {
             self.found = true;
         }

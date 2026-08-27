@@ -164,3 +164,13 @@ fn elided_ref_return() {
     assert_eq!(f("ab"), "!");
     assert_eq!(f(""), "!");
 }
+
+#[rec_closure]
+#[test]
+fn explicit_lifetime_ref_return() {
+    // The escape hatch for elided reference returns: explicit lifetimes
+    // (`-> &'static str`) compile fine through the zero-allocation path.
+    let marker = "!";
+    let f = |n: i32| -> &'static str { if n <= 0 { marker } else { f(n - 1) } };
+    assert_eq!(f(2), "!");
+}
