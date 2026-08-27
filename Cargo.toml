@@ -1,0 +1,22 @@
+[package]
+name = "rec-closure"
+version = "0.1.0"
+authors = ["5-6-1 <5-6-1@users.noreply.github.com>"]
+description = "Attribute macro turning self-referential `let name = |...|` closures into recursive closures"
+keywords = ["closure", "recursion", "proc_macro", "macro"]
+categories = ["rust-patterns"]
+edition = "2024"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+quote = "1"
+proc-macro2 = "1"
+syn = { version = "3", features = ["full", "visit", "visit-mut"] }
+
+[lints.rust]
+# MSVC emits "creating library ...dll.lib" on stderr; this lint is not in the
+# `warnings` group, so it would otherwise clutter every build.
+linker_messages = "allow"
+
