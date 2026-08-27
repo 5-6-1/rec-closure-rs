@@ -195,3 +195,45 @@ fn underscore_lifetime_ref_return() {
     let f = |s: &str| -> &'_ str { if s.is_empty() { marker } else { f(&s[1..]) } };
     assert_eq!(f("ab"), "!");
 }
+
+#[rec_closure]
+#[test]
+fn fn_ptr_param_static_return() {
+    // A `fn`-pointer parameter contains a reference (`fn(&str)`) that is not
+    // a borrowable input for elision; with no borrowable inputs the inferred
+    // `_` return resolves the `'static` return, like a native closure.
+    let f = |cb: fn(&str) -> i32| -> &str { if cb("x") > 0 { "a" } else { f(cb) } };
+    let g = |cb: fn(&str) -> i32| f(cb);
+    assert_eq!(g(|_| 1), "a");
+}
+
+#[rec_closure]
+#[test]
+fn fn_ptr_param_not_miscounted() {
+    // One real reference parameter plus a `fn`-pointer parameter: the fn
+    // pointer's inner `&str` must not push the count past one, so the `fn`
+    // path's elision binds the return to `a`.
+    let f = |a: &str, cb: fn(&str) -> i32| -> &str {
+        if a.is_empty() || cb(a) > 0 { a } else { f(&a[1..], cb) }
+    };
+    let is_hi = |s: &str| if s == "hi" { 1 } else { 0 };
+    assert_eq!(f("hi", is_hi), "hi");
+    assert_eq!(f("no", is_hi), "");
+}
+
+#[rec_closure]
+#[test]
+fn zero_input_elided_return() {
+    // Zero parameters with an elided reference return: like a native
+    // closure, the `'static` return resolves through the inferred store.
+    let c = std::cell::Cell::new(2);
+    let f = || -> &str {
+        if c.get() == 0 {
+            "done"
+        } else {
+            c.set(c.get() - 1);
+            f()
+        }
+    };
+    assert_eq!(f(), "done");
+}

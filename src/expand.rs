@@ -112,10 +112,17 @@ impl<'a> Visit<'a> for ElidedRefFinder {
         }
         visit::visit_type_reference(self, ty);
     }
+
+    fn visit_type_fn_ptr(&mut self, _: &'a syn::TypeFnPtr) {}
+
+    fn visit_trait_bound(&mut self, _: &'a syn::TraitBound) {}
 }
 
 /// Whether any reference occurs anywhere in `ty` (recursively), so container
 /// parameters like `Vec<&mut T>` count as reference parameters too.
+/// References inside `fn` pointers and trait bounds (`fn(&str)`,
+/// `Box<dyn Fn(&str)`) are *not* borrowable input lifetimes for Rust's
+/// elision rules, so they are skipped.
 fn type_has_ref(ty: &Type) -> bool {
     let mut v = AnyRefFinder { found: false };
     v.visit_type(ty);
@@ -130,6 +137,10 @@ impl<'a> Visit<'a> for AnyRefFinder {
     fn visit_type_reference(&mut self, _: &'a syn::TypeReference) {
         self.found = true;
     }
+
+    fn visit_type_fn_ptr(&mut self, _: &'a syn::TypeFnPtr) {}
+
+    fn visit_trait_bound(&mut self, _: &'a syn::TraitBound) {}
 }
 
 pub(crate) fn expand_closure(
@@ -169,29 +180,19 @@ pub(crate) fn expand_closure(
             // A plain top-level reference return (`&str` / `&'_ str`) cannot
             // go through the zero-alloc `Fn(&dyn HideFn, ...) -> ...` bound
             // (E0106, the elision rule picks `&dyn HideFn`). With exactly one
-            // reference parameter:
-            // - capture-free: the `fn` path's own elision rule resolves the
-            //   return borrowing from that parameter — the best lowering.
-            // - capturing: the inferred `_` return only resolves a `'static`
-            //   return; a borrow return then fails in rustc (E0623) with no
-            //   better option on stable — documented in the README.
-            // Any other arity (zero or multiple reference inputs) cannot be
-            // expressed by any path; refuse with a hint.
+            // reference parameter and no captures, the `fn` path's own
+            // elision rule resolves the return borrowing from that parameter
+            // — the best lowering. Every other shape (zero inputs, multiple
+            // inputs, captures) goes through the inferred store, whose `_`
+            // return resolves a `'static` return (native closures treat a
+            // missing borrow input the same way); a borrow return then fails
+            // in rustc (E0623) — use explicit lifetimes in that case.
             RetRef::TopLevel => {
                 let ref_params = ta.tys.iter().filter(|t| type_has_ref(t)).count();
-                if ref_params == 1 {
-                    if !captures_external(closure, name) {
-                        Ok(expand_fn(name, closure, &ta, ctx))
-                    } else {
-                        Ok(expand_inferred(name, closure, n, ctx))
-                    }
+                if ref_params == 1 && !captures_external(closure, name) {
+                    Ok(expand_fn(name, closure, &ta, ctx))
                 } else {
-                    Err(syn::Error::new_spanned(
-                        closure,
-                        "an elided reference return (`-> &str`) needs exactly one \
-                         reference parameter to borrow from; use explicit \
-                         lifetimes such as `-> &'static str`",
-                    ))
+                    Ok(expand_inferred(name, closure, n, ctx))
                 }
             }
             // No elided reference in the return: normal path selection.

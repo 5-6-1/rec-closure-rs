@@ -103,4 +103,11 @@ impl VisitMut for LiftRefs {
         self.lifetimes.push(lt.clone());
         ty.lifetime = Some(lt);
     }
+
+    // References inside `fn` pointers and trait bounds are already
+    // higher-ranked in the source (`fn(&str)`, `dyn Fn(&str)`); lifting them
+    // would nest HRTB and break the signature, so leave them untouched.
+    fn visit_type_fn_ptr_mut(&mut self, _: &mut syn::TypeFnPtr) {}
+
+    fn visit_trait_bound_mut(&mut self, _: &mut syn::TraitBound) {}
 }
