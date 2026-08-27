@@ -136,6 +136,9 @@ fn main() {
 - Mutually recursive closures are not supported: `let f = |n| g(n); let g =
   |n| f(n);` — neither body references its own name, so neither is
   recognized as recursive and the forward reference fails to resolve.
+- The recursive closure must be a bare initializer: `let f = |n| ...;`.
+  Parenthesized forms (`let f = (|n| ...);`) are not recognized — the
+  supported syntax is deliberately just the native closure binding.
 - The rewrite of the recursive name is scope-aware but syntactic: references
   that resolve to an inner binding shadowing the recursive name (including
   `let` chains, `const`/`static`/`fn` items, match arms, and nested closure

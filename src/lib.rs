@@ -147,18 +147,8 @@ fn as_recursive_let(stmt: &Stmt) -> Option<(&Ident, &ExprClosure)> {
     let Stmt::Local(local) = stmt else { return None };
     let name = pat_ident(&local.pat)?;
     let init = local.init.as_ref()?;
-    let Expr::Closure(closure) = strip_parens(&init.expr) else { return None };
+    let Expr::Closure(closure) = &*init.expr else { return None };
     body_refers_to(closure, name).then_some((name, closure))
-}
-
-/// Strip transparent parentheses / invisible delimiters so that
-/// `let f = (|n| ...);` and `let f = ((|n| ...));` are recognized too.
-fn strip_parens(expr: &Expr) -> &Expr {
-    match expr {
-        Expr::Paren(p) => strip_parens(&p.expr),
-        Expr::Group(g) => strip_parens(&g.expr),
-        other => other,
-    }
 }
 
 // ---------------------------------------------------------------------------
