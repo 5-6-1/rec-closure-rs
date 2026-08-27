@@ -111,3 +111,65 @@ impl VisitMut for LiftRefs {
 
     fn visit_trait_bound_mut(&mut self, _: &mut syn::TraitBound) {}
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use quote::ToTokens;
+    use syn::Type;
+    use syn::parse_str;
+
+    /// Apply the HRTB lifting to a type and return its output plus the
+    /// collected fresh lifetime names.
+    fn lifted(input: &str) -> (String, Vec<String>) {
+        let ty: Type = parse_str(input).unwrap();
+        let mut lift = LiftRefs { lifetimes: Vec::new(), counter: 0 };
+        let mut t = ty;
+        lift.visit_type_mut(&mut t);
+        let names = lift.lifetimes.iter().map(|l| l.ident.to_string()).collect();
+        (t.to_token_stream().to_string(), names)
+    }
+
+    #[test]
+    fn lifts_single_ref() {
+        let (out, lts) = lifted("&str");
+        assert!(out.contains("& 'a0 str"), "out: {out}");
+        assert_eq!(lts, ["a0"]);
+    }
+
+    #[test]
+    fn lifts_ref_inside_container() {
+        let (out, lts) = lifted("Vec<&mut i32>");
+        assert!(out.contains("& 'a0 mut i32"), "out: {out}");
+        assert_eq!(lts, ["a0"]);
+    }
+
+    #[test]
+    fn lifts_double_reference_independently() {
+        // Recursion visits the inner reference first, so the outer one gets
+        // the later lifetime.
+        let (out, lts) = lifted("&(&str)");
+        assert!(out.contains("& 'a1 (& 'a0 str)"), "out: {out}");
+        assert_eq!(lts, ["a0", "a1"]);
+    }
+
+    #[test]
+    fn lifts_multiple_refs_in_generic_args() {
+        let (_, lts) = lifted("Result<&str, &mut [u8]>");
+        assert_eq!(lts, ["a0", "a1"]);
+    }
+
+    #[test]
+    fn skips_fn_pointer_refs() {
+        let (out, lts) = lifted("fn(&str) -> i32");
+        assert!(lts.is_empty(), "fn-pointer refs must not lift: {lts:?}");
+        assert!(out.contains("& str"), "out: {out}");
+    }
+
+    #[test]
+    fn skips_trait_bound_refs() {
+        let (out, lts) = lifted("Box<dyn Fn(&str) -> i32>");
+        assert!(lts.is_empty(), "trait-bound refs must not lift: {lts:?}");
+        assert!(out.contains("& str"), "out: {out}");
+    }
+}

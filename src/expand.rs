@@ -300,3 +300,39 @@ fn expand_inferred(name: &Ident, closure: &ExprClosure, n: usize, ctx: &mut Ctx)
         name_stmt,
     ]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use syn::{Type, parse_str};
+
+    #[test]
+    fn ref_detection_skips_fn_ptr_and_bounds() {
+        assert!(type_has_ref(&parse_str::<Type>("&str").unwrap()));
+        assert!(type_has_ref(&parse_str::<Type>("Vec<&mut i32>").unwrap()));
+        // Top-level `&` counts even when the pointee is a trait object.
+        assert!(type_has_ref(&parse_str::<Type>("&dyn Fn(&str) -> i32").unwrap()));
+        // References nested in fn pointers / trait bounds are not borrowable
+        // input lifetimes for elision.
+        assert!(!type_has_ref(&parse_str::<Type>("fn(&str) -> i32").unwrap()));
+        assert!(!type_has_ref(&parse_str::<Type>("Box<dyn Fn(&str) -> i32>").unwrap()));
+    }
+
+    #[test]
+    fn elided_return_classification() {
+        assert!(matches!(ret_elided_ref(&parse_str::<Type>("&str").unwrap()), RetRef::TopLevel));
+        assert!(matches!(ret_elided_ref(&parse_str::<Type>("&'_ str").unwrap()), RetRef::TopLevel));
+        assert!(matches!(
+            ret_elided_ref(&parse_str::<Type>("Option<&str>").unwrap()),
+            RetRef::Nested
+        ));
+        assert!(matches!(
+            ret_elided_ref(&parse_str::<Type>("fn(&str) -> i32").unwrap()),
+            RetRef::None
+        ));
+        assert!(matches!(
+            ret_elided_ref(&parse_str::<Type>("&'static str").unwrap()),
+            RetRef::None
+        ));
+    }
+}

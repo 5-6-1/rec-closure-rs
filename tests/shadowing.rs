@@ -297,6 +297,22 @@ fn while_let_chain_shadowing() {
 
 #[rec_closure]
 #[test]
+fn match_guard_binding_shadow() {
+    // The arm pattern `f if f > 0` binds `f`; syn 3 visits the guard
+    // expression *after* the pattern, and the shadow flag is set before
+    // `visit_pat_mut` runs, so the guard's `f` and the arm body's `f` refer
+    // to the arm binding, while the `_` arm still recurses.
+    let f = |n: i32| -> i32 {
+        match n {
+            f if f > 0 => f,
+            _ => f(n - 1),
+        }
+    };
+    assert_eq!(f(3), 3); // arm binding: f = n = 3
+}
+
+#[rec_closure]
+#[test]
 fn const_item_shadows_recursive_name() {
     // A `const f` shadows the recursive name from its statement onward.
     let base = 1;
