@@ -6,6 +6,10 @@ description = "Attribute macro turning self-referential `let name = |...|` closu
 keywords = ["closure", "recursion", "proc_macro", "macro"]
 categories = ["rust-patterns"]
 edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/5-6-1/rec-closure-rs"
+readme = "README.md"
 
 [lib]
 proc-macro = true
