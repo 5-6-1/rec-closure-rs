@@ -2,7 +2,7 @@
 
 use proc_macro2::Ident;
 use syn::{
-    ExprClosure, Pat, ReturnType, Stmt, Type, parse_quote,
+    ExprClosure, Lifetime, Pat, ReturnType, Stmt, Type, parse_quote,
     visit::{self, Visit},
 };
 
@@ -64,9 +64,19 @@ enum RetRef {
     Nested,
 }
 
+/// A reference lifetime is elided if it is omitted (`&str`) or written as the
+/// anonymous `'_` (`&'_ str`) — both resolve through Rust's elision rules and
+/// cannot be lifted to an explicit lifetime by the macro.
+fn is_elided(lt: &Option<Lifetime>) -> bool {
+    match lt {
+        None => true,
+        Some(l) => l.ident == "_",
+    }
+}
+
 fn ret_elided_ref(ret: &Type) -> RetRef {
     match ret {
-        Type::Reference(r) if r.lifetime.is_none() => {
+        Type::Reference(r) if is_elided(&r.lifetime) => {
             if type_has_elided_ref(&r.elem) {
                 RetRef::Nested
             } else {
@@ -83,7 +93,8 @@ fn ret_elided_ref(ret: &Type) -> RetRef {
     }
 }
 
-/// Whether any reference with an elided lifetime occurs anywhere in `ty`.
+/// Whether any reference with an elided (or `'_`) lifetime occurs anywhere
+/// in `ty`.
 fn type_has_elided_ref(ty: &Type) -> bool {
     let mut v = ElidedRefFinder { found: false };
     v.visit_type(ty);
@@ -96,10 +107,28 @@ struct ElidedRefFinder {
 
 impl<'a> Visit<'a> for ElidedRefFinder {
     fn visit_type_reference(&mut self, ty: &'a syn::TypeReference) {
-        if ty.lifetime.is_none() {
+        if is_elided(&ty.lifetime) {
             self.found = true;
         }
         visit::visit_type_reference(self, ty);
+    }
+}
+
+/// Whether any reference occurs anywhere in `ty` (recursively), so container
+/// parameters like `Vec<&mut T>` count as reference parameters too.
+fn type_has_ref(ty: &Type) -> bool {
+    let mut v = AnyRefFinder { found: false };
+    v.visit_type(ty);
+    v.found
+}
+
+struct AnyRefFinder {
+    found: bool,
+}
+
+impl<'a> Visit<'a> for AnyRefFinder {
+    fn visit_type_reference(&mut self, _: &'a syn::TypeReference) {
+        self.found = true;
     }
 }
 
@@ -137,16 +166,25 @@ pub(crate) fn expand_closure(
                  nested inside a container (e.g. `Option<&str>`); use explicit \
                  lifetimes such as `Option<&'static str>`",
             )),
-            // A plain top-level reference return (`&str`) cannot go through
-            // the zero-alloc `Fn(&dyn HideFn, ...) -> ...` bound (E0106, the
-            // elision rule picks `&dyn HideFn`), and the inferred `_` return
-            // can only resolve it when there is exactly one reference input
-            // (the sole lifetime to borrow from). Any other shape — multiple
-            // or zero reference inputs — is refused with a hint.
+            // A plain top-level reference return (`&str` / `&'_ str`) cannot
+            // go through the zero-alloc `Fn(&dyn HideFn, ...) -> ...` bound
+            // (E0106, the elision rule picks `&dyn HideFn`). With exactly one
+            // reference parameter:
+            // - capture-free: the `fn` path's own elision rule resolves the
+            //   return borrowing from that parameter — the best lowering.
+            // - capturing: the inferred `_` return only resolves a `'static`
+            //   return; a borrow return then fails in rustc (E0623) with no
+            //   better option on stable — documented in the README.
+            // Any other arity (zero or multiple reference inputs) cannot be
+            // expressed by any path; refuse with a hint.
             RetRef::TopLevel => {
-                let ref_params = ta.tys.iter().filter(|t| matches!(t, Type::Reference(_))).count();
+                let ref_params = ta.tys.iter().filter(|t| type_has_ref(t)).count();
                 if ref_params == 1 {
-                    Ok(expand_inferred(name, closure, n, ctx))
+                    if !captures_external(closure, name) {
+                        Ok(expand_fn(name, closure, &ta, ctx))
+                    } else {
+                        Ok(expand_inferred(name, closure, n, ctx))
+                    }
                 } else {
                     Err(syn::Error::new_spanned(
                         closure,

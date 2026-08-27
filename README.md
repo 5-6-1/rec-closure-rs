@@ -121,10 +121,19 @@ fn main() {
 
 - `Fn` only (no `FnMut`/`FnOnce`): recursion needs a re-borrowable self.
 - `sync` requires the closure and everything it captures to be `Send + Sync`.
-- A reference return (`|s: &str| -> &str`) always routes to the inferred
-  path: the zero-allocation `Fn(&dyn HideFn, ...) -> ...` bound cannot
+- A reference return (`|s: &str| -> &str`) always routes away from the
+  zero-allocation path: the `Fn(&dyn HideFn, ...) -> ...` bound cannot
   express an elided reference return (the elision rule would pick
-  `&dyn HideFn`). Capture-free reference returns still lower to a `fn`.
+  `&dyn HideFn`). With exactly one reference parameter, a capture-free
+  closure lowers to a `fn` (whose own elision rule resolves the borrow); a
+  capturing closure goes through the inferred store, which only resolves a
+  `'static` return — a borrow return then fails in rustc (E0623), so use
+  explicit lifetimes (`-> &'static str`) or make the closure capture-free.
+  Zero or multiple reference parameters with an elided return are rejected
+  with a hint. `-> &'_ str` counts as elided.
+- Mutually recursive closures are not supported: `let f = |n| g(n); let g =
+  |n| f(n);` — neither body references its own name, so neither is
+  recognized as recursive and the forward reference fails to resolve.
 - The rewrite of the recursive name is scope-aware but syntactic: references
   that resolve to an inner binding shadowing the recursive name (including
   `let` chains, `const`/`static`/`fn` items, match arms, and nested closure

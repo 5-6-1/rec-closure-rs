@@ -174,3 +174,24 @@ fn explicit_lifetime_ref_return() {
     let f = |n: i32| -> &'static str { if n <= 0 { marker } else { f(n - 1) } };
     assert_eq!(f(2), "!");
 }
+
+#[rec_closure]
+#[test]
+fn fn_path_borrow_return() {
+    // Capture-free + one reference parameter + elided reference return
+    // borrowing from the parameter: the `fn` path's own elision rule handles
+    // it (the inferred `_` return cannot express a borrow).
+    let f = |s: &str| -> &str { if s.is_empty() { s } else { f(&s[1..]) } };
+    assert_eq!(f("ab"), "");
+    assert_eq!(f(""), "");
+}
+
+#[rec_closure]
+#[test]
+fn underscore_lifetime_ref_return() {
+    // `-> &'_ str` is semantically identical to `-> &str` and must be
+    // treated as elided, not as an explicit lifetime.
+    let marker = "!";
+    let f = |s: &str| -> &'_ str { if s.is_empty() { marker } else { f(&s[1..]) } };
+    assert_eq!(f("ab"), "!");
+}
