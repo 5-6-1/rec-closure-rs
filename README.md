@@ -124,13 +124,15 @@ fn main() {
 - A reference return (`|s: &str| -> &str`) always routes away from the
   zero-allocation path: the `Fn(&dyn HideFn, ...) -> ...` bound cannot
   express an elided reference return (the elision rule would pick
-  `&dyn HideFn`). With exactly one reference parameter, a capture-free
-  closure lowers to a `fn` (whose own elision rule resolves the borrow); a
-  capturing closure goes through the inferred store, which only resolves a
-  `'static` return — a borrow return then fails in rustc (E0623), so use
-  explicit lifetimes (`-> &'static str`) or make the closure capture-free.
-  Zero or multiple reference parameters with an elided return are rejected
-  with a hint. `-> &'_ str` counts as elided.
+  `&dyn HideFn`). With exactly one reference parameter and no captures, the
+  closure lowers to a `fn` (whose own elision rule resolves the borrow).
+  Every other shape — zero inputs, multiple inputs, or captures — goes
+  through the inferred store, which resolves a `'static` return just like a
+  native closure; a *borrow* return in those shapes has no way to be
+  expressed and fails with rustc's raw `E0623` (the macro cannot tell a
+  `'static` return from a borrow one ahead of time), so use explicit
+  lifetimes (`-> &'static str`) or make the closure capture-free with a
+  single reference parameter. `-> &'_ str` counts as elided.
 - Mutually recursive closures are not supported: `let f = |n| g(n); let g =
   |n| f(n);` — neither body references its own name, so neither is
   recognized as recursive and the forward reference fails to resolve.

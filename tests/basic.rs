@@ -20,6 +20,15 @@ fn basic_recursion() {
 
 #[rec_closure]
 #[test]
+fn parenthesized_closure() {
+    // `let f = (|n| ...);` is legal native syntax; the initializer must be
+    // unwrapped through transparent parentheses.
+    let f = (|n: i32| -> i32 { if n <= 1 { 1 } else { n * f(n - 1) } });
+    assert_eq!(f(5), 120);
+}
+
+#[rec_closure]
+#[test]
 fn multi_arg_with_mut_patterns() {
     let gcd = |mut a, mut b| {
         if a < b {
