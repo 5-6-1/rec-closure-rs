@@ -189,7 +189,7 @@ pub(crate) fn expand_closure(
             // in rustc (E0623) — use explicit lifetimes in that case.
             RetRef::TopLevel => {
                 let ref_params = ta.tys.iter().filter(|t| type_has_ref(t)).count();
-                if ref_params == 1 && !captures_external(closure, name) {
+                if ref_params == 1 && !captures_external(closure, name, &ctx.items) {
                     Ok(expand_fn(name, closure, &ta, ctx))
                 } else {
                     Ok(expand_inferred(name, closure, n, ctx))
@@ -197,7 +197,7 @@ pub(crate) fn expand_closure(
             }
             // No elided reference in the return: normal path selection.
             RetRef::None => {
-                if !captures_external(closure, name) {
+                if !captures_external(closure, name, &ctx.items) {
                     Ok(expand_fn(name, closure, &ta, ctx))
                 } else {
                     Ok(expand_zero_alloc(name, closure, &ta, n, ctx))

@@ -1,6 +1,6 @@
-//! Name analysis: recursion detection, order-sensitive capture scanning, and
-//! shadowing predicates shared by the capture scan and the self-reference
-//! rewriting.
+//! Capture analysis and shadowing predicates. Recursion detection lives in
+//! `detect.rs`; this module answers "does the closure capture anything
+//! external" and provides the binding predicates both analyses share.
 
 use proc_macro2::Ident;
 use std::collections::HashSet;
@@ -11,62 +11,42 @@ use syn::{
 
 use crate::pat_ident;
 
-/// The identifier of a single-segment path (`f`, `f::<T>`), or `None` for
-/// multi-segment paths (`a::f`), which never denote a local binding.
+/// The identifier of a single-segment path (`f`, `f::<T>`); multi-segment
+/// paths (`a::f`) never denote a local binding.
 pub(crate) fn single_ident(path: &syn::Path) -> Option<&Ident> {
     (path.segments.len() == 1).then(|| &path.segments[0].ident)
 }
 
-/// Standard enum constructors / built-ins that never denote a captured
-/// variable (shadowing them is pathological).
+/// Heuristic whitelist of standard constructors / built-ins that never denote
+/// a captured variable. Not exhaustive; an unrecognized constructor only
+/// matters if the user shadows it with a same-named variable, which is
+/// pathological (the scan then errs safe: counts as a capture).
 fn is_known_ctor(id: &Ident) -> bool {
     matches!(id.to_string().as_str(), "Some" | "None" | "Ok" | "Err")
-}
-
-// ---------------------------------------------------------------------------
-// recursion detection
-// ---------------------------------------------------------------------------
-
-struct RefFinder<'a> {
-    name: &'a Ident,
-    found: bool,
-}
-
-impl<'a> Visit<'a> for RefFinder<'a> {
-    fn visit_expr_path(&mut self, p: &'a syn::ExprPath) {
-        if single_ident(&p.path).is_some_and(|id| id == self.name) {
-            self.found = true;
-        }
-        visit::visit_expr_path(self, p);
-    }
-}
-
-pub(crate) fn body_refers_to(closure: &ExprClosure, name: &Ident) -> bool {
-    let mut f = RefFinder { name, found: false };
-    f.visit_expr(&closure.body);
-    f.found
 }
 
 // ---------------------------------------------------------------------------
 // capture scanning
 // ---------------------------------------------------------------------------
 
-/// Whether the closure body references any name that is not yet bound at the
-/// point of use. Order-sensitive: a `let x = 2;` that shadows an earlier
-/// external use of `x` does not cancel it out, because `let y = x;` is seen
-/// first and reports the capture immediately.
-pub(crate) fn captures_external(closure: &ExprClosure, self_name: &Ident) -> bool {
-    let mut bound: HashSet<Ident> = closure.inputs.iter().filter_map(pat_ident).cloned().collect();
+/// Whether the body references any name not bound at its point of use.
+/// Order-sensitive: a `let x = 2;` shadowing an earlier `let y = x;` does not
+/// cancel the capture reported by `y = x`. `outer_items` holds the in-scope
+/// `fn`/`const`/`static` names, which are never captures.
+pub(crate) fn captures_external(
+    closure: &ExprClosure, self_name: &Ident, outer_items: &HashSet<Ident>,
+) -> bool {
+    let mut bound: HashSet<Ident> = outer_items.clone();
+    bound.extend(closure.inputs.iter().filter_map(pat_ident).cloned());
     bound.insert(self_name.clone());
     let mut v = CaptureScanner { bound: &mut bound, found: false };
     v.visit_expr(&closure.body);
     v.found
 }
 
-/// Order-sensitive capture scan: tracks the names bound so far (parameters,
-/// `let`/`for`/`match` patterns, the recursive name) and flags any reference
-/// to a name not in that set. Block-local bindings are scoped: they are
-/// restored when the block ends.
+/// Order-sensitive capture scan: flags references to names not bound so far
+/// (parameters, `let`/`for`/`match` patterns, the recursive name). Block
+/// bindings are scoped: restored when their block ends.
 struct CaptureScanner<'a> {
     bound: &'a mut HashSet<Ident>,
     found: bool,
@@ -97,7 +77,6 @@ impl<'a> Visit<'a> for CaptureScanner<'a> {
     }
 
     fn visit_local(&mut self, local: &'a syn::Local) {
-        // `let pat = init` evaluates `init` before binding `pat`, so
         // `let x = x;` reads the *outer* `x` on the right.
         if let Some(init) = &local.init {
             self.visit_expr(&init.expr);
@@ -106,8 +85,7 @@ impl<'a> Visit<'a> for CaptureScanner<'a> {
     }
 
     fn visit_expr_for_loop(&mut self, node: &'a syn::ExprForLoop) {
-        // The iterator expression is evaluated before the loop variable is
-        // bound; the variable is scoped to the loop body only.
+        // The iterator is evaluated before the loop variable binds.
         let saved = self.bound.clone();
         self.visit_expr(&node.expr);
         self.visit_pat(&node.pat);
@@ -116,7 +94,7 @@ impl<'a> Visit<'a> for CaptureScanner<'a> {
     }
 
     fn visit_expr_let(&mut self, node: &'a syn::ExprLet) {
-        // `if let pat = expr` evaluates `expr` before binding `pat`. The
+        // `if let pat = expr` evaluates `expr` before binding `pat`; the
         // binding is scoped by the enclosing if/while (see those visitors).
         self.visit_expr(&node.expr);
         self.visit_pat(&node.pat);
@@ -145,8 +123,7 @@ impl<'a> Visit<'a> for CaptureScanner<'a> {
     fn visit_expr_match(&mut self, node: &'a syn::ExprMatch) {
         self.visit_expr(&node.expr);
         for arm in &node.arms {
-            // Arm-pattern bindings are scoped to the arm (pattern, guard,
-            // body) and must not leak into later arms.
+            // Arm-pattern bindings are scoped to the arm only.
             let saved = self.bound.clone();
             self.visit_pat(&arm.pat);
             self.visit_expr(&arm.body);
@@ -165,8 +142,7 @@ impl<'a> Visit<'a> for CaptureScanner<'a> {
     }
 
     fn visit_item_fn(&mut self, node: &'a syn::ItemFn) {
-        // A nested `fn` cannot capture; its parameters and body bindings are
-        // scoped inside it.
+        // A nested `fn` cannot capture; its bindings are scoped inside it.
         let saved = self.bound.clone();
         visit::visit_item_fn(self, node);
         *self.bound = saved;

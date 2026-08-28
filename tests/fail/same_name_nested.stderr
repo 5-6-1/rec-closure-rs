@@ -1,0 +1,17 @@
+error: a nested recursive closure cannot reuse the name of an enclosing recursive closure; rename one of them
+  --> tests/fail/same_name_nested.rs:8:17
+   |
+ 8 |           let f = |m: i32| -> i32 {
+   |  _________________^
+ 9 | |             if m <= 1 {
+10 | |                 1
+11 | |             } else {
+...  |
+14 | |         };
+   | |_________^
+
+error[E0601]: `main` function not found in crate `$CRATE`
+  --> tests/fail/same_name_nested.rs:18:2
+   |
+18 | }
+   |  ^ consider adding a `main` function to `$DIR/tests/fail/same_name_nested.rs`

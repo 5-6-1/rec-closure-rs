@@ -98,7 +98,9 @@ struct LiftRefs {
 impl VisitMut for LiftRefs {
     fn visit_type_reference_mut(&mut self, ty: &mut syn::TypeReference) {
         visit_mut::visit_type_reference_mut(self, ty);
-        let lt = Lifetime::new(&format!("'a{}", self.counter), Span::call_site());
+        // `__rec_` prefix keeps generated lifetimes out of the user's
+        // namespace, consistent with the `__rec_{N}_{role}` identifiers.
+        let lt = Lifetime::new(&format!("'__rec_a{}", self.counter), Span::call_site());
         self.counter += 1;
         self.lifetimes.push(lt.clone());
         ty.lifetime = Some(lt);
@@ -133,15 +135,15 @@ mod tests {
     #[test]
     fn lifts_single_ref() {
         let (out, lts) = lifted("&str");
-        assert!(out.contains("& 'a0 str"), "out: {out}");
-        assert_eq!(lts, ["a0"]);
+        assert!(out.contains("& '__rec_a0 str"), "out: {out}");
+        assert_eq!(lts, ["__rec_a0"]);
     }
 
     #[test]
     fn lifts_ref_inside_container() {
         let (out, lts) = lifted("Vec<&mut i32>");
-        assert!(out.contains("& 'a0 mut i32"), "out: {out}");
-        assert_eq!(lts, ["a0"]);
+        assert!(out.contains("& '__rec_a0 mut i32"), "out: {out}");
+        assert_eq!(lts, ["__rec_a0"]);
     }
 
     #[test]
@@ -149,14 +151,14 @@ mod tests {
         // Recursion visits the inner reference first, so the outer one gets
         // the later lifetime.
         let (out, lts) = lifted("&(&str)");
-        assert!(out.contains("& 'a1 (& 'a0 str)"), "out: {out}");
-        assert_eq!(lts, ["a0", "a1"]);
+        assert!(out.contains("& '__rec_a1 (& '__rec_a0 str)"), "out: {out}");
+        assert_eq!(lts, ["__rec_a0", "__rec_a1"]);
     }
 
     #[test]
     fn lifts_multiple_refs_in_generic_args() {
         let (_, lts) = lifted("Result<&str, &mut [u8]>");
-        assert_eq!(lts, ["a0", "a1"]);
+        assert_eq!(lts, ["__rec_a0", "__rec_a1"]);
     }
 
     #[test]

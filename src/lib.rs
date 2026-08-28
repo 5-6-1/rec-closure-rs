@@ -28,18 +28,20 @@ extern crate proc_macro;
 use proc_macro::TokenStream;
 use proc_macro2::Ident;
 use quote::{format_ident, quote};
+use std::collections::HashSet;
 use syn::{
-    Expr, ExprClosure, ItemFn, Pat, Stmt, parse_macro_input,
+    Expr, ExprClosure, Item, ItemFn, Pat, Stmt, parse_macro_input,
     visit_mut::{self, VisitMut},
 };
 
 mod analysis;
+mod detect;
 mod expand;
 mod replace;
 mod store;
 mod zero_alloc;
 
-use crate::analysis::body_refers_to;
+use crate::detect::body_refers_to;
 use crate::expand::expand_closure;
 use crate::replace::replace_self_ref;
 
@@ -65,7 +67,8 @@ pub fn rec_closure(args: TokenStream, input: TokenStream) -> TokenStream {
     parse_macro_input!(args with parse);
     let mut item = parse_macro_input!(input as ItemFn);
 
-    let mut ctx = Ctx { counter: 0, sync, errors: Vec::new(), active: Vec::new() };
+    let mut ctx =
+        Ctx { counter: 0, sync, errors: Vec::new(), active: Vec::new(), items: HashSet::new() };
     expand_stmts(&mut item.block.stmts, &mut ctx);
     if !ctx.errors.is_empty() {
         let mut all = ctx.errors.into_iter();
@@ -93,11 +96,18 @@ pub(crate) struct Ctx {
     // Names of recursive closures currently being expanded (nested-recursion
     // detection).
     pub(crate) active: Vec<Ident>,
+    // Value-namespace item names in scope (`fn`/`const`/`static`): references
+    // to them are never captures, so capture analysis can skip them.
+    pub(crate) items: HashSet<Ident>,
 }
 
 impl VisitMut for Ctx {
     fn visit_block_mut(&mut self, block: &mut syn::Block) {
+        // Items declared inside a nested block are scoped to it; restore the
+        // outer item set afterwards.
+        let saved = self.items.clone();
         expand_stmts(&mut block.stmts, self);
+        self.items = saved;
         visit_mut::visit_block_mut(self, block);
     }
 
@@ -126,6 +136,13 @@ impl Ctx {
 fn expand_stmts(stmts: &mut Vec<Stmt>, ctx: &mut Ctx) {
     let mut out = Vec::with_capacity(stmts.len());
     for mut stmt in stmts.drain(..) {
+        // Value-namespace items (`fn`/`const`/`static`) become visible to
+        // capture analysis from their statement onward.
+        if let Stmt::Item(item) = &stmt
+            && let Some(id) = item_ident(item)
+        {
+            ctx.items.insert(id.clone());
+        }
         if let Some((name, closure)) = as_recursive_let(&stmt) {
             match expand_closure(name, closure, ctx) {
                 Ok(expanded) => out.extend(expanded),
@@ -140,6 +157,17 @@ fn expand_stmts(stmts: &mut Vec<Stmt>, ctx: &mut Ctx) {
         out.push(stmt);
     }
     *stmts = out;
+}
+
+/// The value-namespace name an item introduces (`fn`/`const`/`static`), or
+/// `None` for type-only items (`struct`, `enum`, `type`, ...).
+fn item_ident(item: &Item) -> Option<&Ident> {
+    match item {
+        Item::Fn(f) => Some(&f.sig.ident),
+        Item::Const(c) => Some(&c.ident),
+        Item::Static(s) => Some(&s.ident),
+        _ => None,
+    }
 }
 
 /// A `let name = <closure>;` statement whose body references `name`.

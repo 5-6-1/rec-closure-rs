@@ -1,0 +1,17 @@
+error: the return type contains references with elided lifetimes nested inside a container (e.g. `Option<&str>`); use explicit lifetimes such as `Option<&'static str>`
+  --> tests/fail/nested_elided_ref_return.rs:9:13
+   |
+ 9 |       let f = |s: &str| -> Option<&str> {
+   |  _____________^
+10 | |         if s.is_empty() {
+11 | |             None
+12 | |         } else {
+...  |
+15 | |     };
+   | |_____^
+
+error[E0601]: `main` function not found in crate `$CRATE`
+  --> tests/fail/nested_elided_ref_return.rs:17:2
+   |
+17 | }
+   |  ^ consider adding a `main` function to `$DIR/tests/fail/nested_elided_ref_return.rs`

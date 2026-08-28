@@ -1,5 +1,9 @@
 # rec_closure
 
+[![crates.io](https://img.shields.io/crates/v/rec-closure.svg)](https://crates.io/crates/rec-closure)
+[![docs.rs](https://img.shields.io/docsrs/rec-closure)](https://docs.rs/rec-closure)
+[![CI](https://github.com/5-6-1/rec-closure-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/5-6-1/rec-closure-rs/actions/workflows/ci.yml)
+
 A procedural macro that turns a closure into a recursive closure while
 keeping the native-closure look: just refer to the binding by name inside
 the body.
@@ -7,8 +11,9 @@ the body.
 ## Status
 
 Implemented and tested: all three expansion paths below work end to end and
-are covered by `cargo test` (`tests/rec_closure.rs`). The snippets in this
-README are the actual surface syntax.
+are covered by `cargo test` (`tests/basic.rs`, `tests/nesting.rs`,
+`tests/references.rs`, `tests/shadowing.rs`, plus the compile-fail matrix in
+`tests/fail.rs`). The snippets in this README are the actual surface syntax.
 
 ## Goal syntax
 

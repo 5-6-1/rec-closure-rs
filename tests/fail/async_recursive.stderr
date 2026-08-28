@@ -1,0 +1,17 @@
+error: async recursive closures are not supported
+  --> tests/fail/async_recursive.rs:7:13
+   |
+ 7 |       let f = async |n: i32| -> i32 {
+   |  _____________^
+ 8 | |         if n <= 1 {
+ 9 | |             1
+10 | |         } else {
+...  |
+13 | |     };
+   | |_____^
+
+error[E0601]: `main` function not found in crate `$CRATE`
+  --> tests/fail/async_recursive.rs:15:2
+   |
+15 | }
+   |  ^ consider adding a `main` function to `$DIR/tests/fail/async_recursive.rs`
