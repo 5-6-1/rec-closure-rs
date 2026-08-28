@@ -1,6 +1,6 @@
 [package]
 name = "rec-closure"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["5-6-1 <5-6-1@users.noreply.github.com>"]
 description = "Attribute macro turning self-referential `let name = |...|` closures into recursive closures"
 keywords = ["closure", "recursion", "proc_macro", "macro"]

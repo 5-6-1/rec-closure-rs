@@ -94,6 +94,21 @@ fn capture_free_typed_becomes_fn() {
 
 #[rec_closure]
 #[test]
+fn nested_item_call_is_not_a_capture() {
+    // Calling an outer `fn` item *nested inside the annotated fn* is not a
+    // capture (the item pre-scan recognizes it), so the closure still lowers
+    // to a plain `fn` (provable via function-pointer coercion) even though
+    // its body calls outside itself.
+    fn helper(n: i32) -> i32 {
+        n * 10
+    }
+    let f = |n: i32| -> i32 { if n <= 1 { 1 } else { helper(n) + f(n - 1) } };
+    let f: fn(i32) -> i32 = f;
+    assert_eq!(f(3), 51); // 30 + (20 + 1)
+}
+
+#[rec_closure]
+#[test]
 fn plain_closures_left_untouched() {
     let add = |a: i32, b: i32| a + b;
     assert_eq!(add(2, 3), 5);

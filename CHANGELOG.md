@@ -5,7 +5,7 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.1] - 2026-08-28
 
 ### Fixed
 
@@ -13,7 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   parameter (or any inner binding) named like the recursive binding is no
   longer miscounted as a self-call, so non-recursive closures stay
   unexpanded and the detection agrees with the rewrite.
-- Item names (`fn`/`const`/`static`) are no longer miscounted as captures.
+- `fn`/`const`/`static` items nested inside the annotated `fn` are no longer
+  miscounted as captures; calling such an item no longer forces the dyn path.
 - `rust-version` is pinned to the real MSRV (1.88) and checked by a CI job.
 - The compile-fail contracts (async, same-name nesting, container-nested
   elided reference returns) are covered by a trybuild matrix.

@@ -116,6 +116,12 @@ fn main() {
 | complete, captures, non-reference return | `&dyn HideFn` self-param (see `examples/typed.rs`) | one dyn dispatch, zero alloc |
 | reference return (or none/partial) | `Rc + OnceCell + Weak` (see `examples/optimized.rs`) | `get` + `upgrade` + dyn dispatch |
 
+"Captures" means uses of ordinary local variables. `fn`/`const`/`static`
+items *nested inside the annotated `fn`* are pre-scanned and never counted
+as captures: a fully annotated closure that calls such an item (or reads
+its `const`) takes the capture-free path, so the plain-`fn` lowering stays
+available even when the closure's body calls a helper defined beside it.
+
 ## Verified expansion shapes
 
 - `examples/optimized.rs` — single-threaded inferred path
@@ -141,6 +147,12 @@ fn main() {
 - Mutually recursive closures are not supported: `let f = |n| g(n); let g =
   |n| f(n);` — neither body references its own name, so neither is
   recognized as recursive and the forward reference fails to resolve.
+- References to `fn`/`const`/`static` items *nested inside the annotated `fn`*
+  are treated as non-captures (see Path selection), so they do not force the
+  dyn path. Items declared at module level are outside the macro's view and
+  are conservatively counted as captures — use a nested item to keep the
+  capture-free lowering. Shadowing such an item's name *inside* the closure
+  body is still honored by the rewrite's scope tracking.
 - The recursive closure must be a bare initializer: `let f = |n| ...;`.
   Parenthesized forms (`let f = (|n| ...);`) are not recognized — the
   supported syntax is deliberately just the native closure binding.
