@@ -20,6 +20,7 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
       - name: Enforce 350-line file limit
+        shell: bash
         run: |
           for f in $(find src tests -name '*.rs'); do
             lines=$(wc -l < "$f")
