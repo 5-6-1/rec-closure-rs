@@ -17,8 +17,12 @@ jobs:
         with:
           components: clippy, rustfmt
       - run: cargo fmt --check
+      - run: cargo check --all-targets
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+      - run: cargo doc --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
       - name: Enforce 350-line file limit
         shell: bash
         run: |

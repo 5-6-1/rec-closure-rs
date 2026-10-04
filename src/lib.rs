@@ -13,37 +13,39 @@
 //! ```
 //!
 //! A closure bound with `let name = ...` whose body references `name` is
-//! rewritten into a recursive closure. With complete type annotations the
-//! expansion is zero-allocation (a `&dyn HideFn` self-parameter, Y-combinator
-//! style); without them it falls back to `Rc + OnceCell + Weak` with fully
+//! rewritten into a recursive closure. Complete signatures expressible by
+//! local items enable zero-allocation expansion (a local `fn` or a
+//! `&dyn HideFn` self-parameter); other signatures use `Rc + OnceCell + Weak` with
 //! inferred types. `#[rec_closure(sync)]` switches to the multithreaded
 //! expansion (`Arc + OnceLock`, `Send + Sync`).
 //!
-//! Every generated identifier carries a per-fn sequence number
-//! (`__rec_{N}_{role}`), so several closures — including nested ones — never
-//! collide.
+//! Generated names use mixed-site hygiene and per-function numbered families,
+//! skipping families already present in user tokens, including lifetimes.
 
 extern crate proc_macro;
 
 use proc_macro::TokenStream;
 use proc_macro2::Ident;
-use quote::{format_ident, quote};
+use quote::{ToTokens, quote};
 use std::collections::HashSet;
-use syn::{
-    Expr, ExprClosure, Item, ItemFn, Pat, Stmt, parse_macro_input,
-    visit_mut::{self, VisitMut},
-};
+use syn::{Expr, ExprClosure, ItemFn, Pat, Stmt, parse_macro_input, visit_mut::VisitMut};
 
 mod analysis;
-mod detect;
+mod attributes;
+mod context;
 mod expand;
+mod names;
 mod replace;
+mod scope;
+mod signature;
 mod store;
+mod validate;
 mod zero_alloc;
 
-use crate::detect::body_refers_to;
 use crate::expand::expand_closure;
-use crate::replace::replace_self_ref;
+use crate::names::role_ident;
+use crate::replace::{body_refers_to, replace_self_ref};
+use crate::scope::{block_items, pat_names};
 
 // ---------------------------------------------------------------------------
 // attribute entry point
@@ -67,12 +69,17 @@ pub fn rec_closure(args: TokenStream, input: TokenStream) -> TokenStream {
     parse_macro_input!(args with parse);
     let mut item = parse_macro_input!(input as ItemFn);
 
-    let mut ctx =
-        Ctx { counter: 0, sync, errors: Vec::new(), active: Vec::new(), items: HashSet::new() };
+    let mut ctx = Ctx {
+        counter: 0,
+        reserved: names::reserved_families(item.to_token_stream()),
+        sync,
+        errors: Vec::new(),
+        items: HashSet::new(),
+        generics: signature::generic_names(&item.sig.generics),
+    };
     expand_stmts(&mut item.block.stmts, &mut ctx);
-    if !ctx.errors.is_empty() {
-        let mut all = ctx.errors.into_iter();
-        let mut combined = all.next().expect("checked non-empty");
+    let mut all = ctx.errors.into_iter();
+    if let Some(mut combined) = all.next() {
         for e in all {
             combined.combine(e);
         }
@@ -88,45 +95,17 @@ pub fn rec_closure(args: TokenStream, input: TokenStream) -> TokenStream {
 
 pub(crate) struct Ctx {
     pub(crate) counter: usize,
+    pub(crate) reserved: HashSet<usize>,
     pub(crate) sync: bool,
     // Every failed expansion parks its diagnostic here while the offending
     // statement stays unexpanded, so rustc reports one error per bad closure
     // instead of stopping at the first.
     pub(crate) errors: Vec<syn::Error>,
-    // Names of recursive closures currently being expanded (nested-recursion
-    // detection).
-    pub(crate) active: Vec<Ident>,
     // Value-namespace item names in scope (`fn`/`const`/`static`): references
     // to them are never captures, so capture analysis can skip them.
     pub(crate) items: HashSet<Ident>,
-}
-
-impl VisitMut for Ctx {
-    fn visit_block_mut(&mut self, block: &mut syn::Block) {
-        // Items declared inside a nested block are scoped to it; restore the
-        // outer item set afterwards.
-        let saved = self.items.clone();
-        expand_stmts(&mut block.stmts, self);
-        self.items = saved;
-        visit_mut::visit_block_mut(self, block);
-    }
-
-    fn visit_item_fn_mut(&mut self, node: &mut ItemFn) {
-        // A nested `fn` is an independent scope (it cannot capture the outer
-        // bindings): a recursive closure inside it may reuse an enclosing
-        // closure's name, so the active-names stack must not leak in.
-        let saved = std::mem::take(&mut self.active);
-        visit_mut::visit_item_fn_mut(self, node);
-        self.active = saved;
-    }
-}
-
-impl Ctx {
-    /// Recursively expand recursive closures inside every block of `expr`
-    /// (including nested closure bodies).
-    pub(crate) fn expand_expr_blocks(&mut self, expr: &mut Expr) {
-        self.visit_expr_mut(expr);
-    }
+    // Local generated items cannot inherit these enclosing parameters.
+    pub(crate) generics: HashSet<Ident>,
 }
 
 // ---------------------------------------------------------------------------
@@ -134,40 +113,55 @@ impl Ctx {
 // ---------------------------------------------------------------------------
 
 fn expand_stmts(stmts: &mut Vec<Stmt>, ctx: &mut Ctx) {
+    let saved = ctx.items.clone();
+    ctx.items.extend(block_items(stmts));
     let mut out = Vec::with_capacity(stmts.len());
     for mut stmt in stmts.drain(..) {
-        // Value-namespace items (`fn`/`const`/`static`) become visible to
-        // capture analysis from their statement onward.
-        if let Stmt::Item(item) = &stmt
-            && let Some(id) = item_ident(item)
-        {
-            ctx.items.insert(id.clone());
-        }
+        let error_start = ctx.errors.len();
+        let bindings = match &stmt {
+            Stmt::Local(local) => pat_names(&local.pat),
+            _ => HashSet::new(),
+        };
         if let Some((name, closure)) = as_recursive_let(&stmt) {
-            match expand_closure(name, closure, ctx) {
+            match expand_closure(name, closure, ctx)
+                .and_then(|expanded| attributes::inherit(&stmt, expanded))
+            {
                 Ok(expanded) => out.extend(expanded),
                 Err(e) => {
                     ctx.errors.push(e);
                     out.push(stmt);
                 }
             }
-            continue;
+        } else {
+            ctx.visit_stmt_mut(&mut stmt);
+            out.push(stmt);
         }
-        ctx.visit_stmt_mut(&mut stmt);
-        out.push(stmt);
+        // The final emitted statement retains the original attributes.
+        // Only inspect its prefix when diagnostics need configuration;
+        // successful expansions need no extra tokenization or parsing.
+        let cfg = if ctx.errors.len() > error_start {
+            out.last().map(attributes::statement_configuration).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        if !cfg.is_empty() {
+            // Let rustc evaluate cfg, including features and cfg_attr. A
+            // disabled parent statement also suppresses nested diagnostics.
+            let errors: Vec<_> = ctx.errors.drain(error_start..).collect();
+            for error in errors {
+                let error = error.into_compile_error();
+                match syn::parse2(quote!(#(#cfg)* { #error })) {
+                    Ok(error) => out.push(error),
+                    Err(error) => ctx.errors.push(error),
+                }
+            }
+        }
+        // Initializers see the previous binding; following statements see
+        // the new local, which may shadow a previously visible item.
+        ctx.items.retain(|id| !bindings.contains(id));
     }
     *stmts = out;
-}
-
-/// The value-namespace name an item introduces (`fn`/`const`/`static`), or
-/// `None` for type-only items (`struct`, `enum`, `type`, ...).
-fn item_ident(item: &Item) -> Option<&Ident> {
-    match item {
-        Item::Fn(f) => Some(&f.sig.ident),
-        Item::Const(c) => Some(&c.ident),
-        Item::Static(s) => Some(&s.ident),
-        _ => None,
-    }
+    ctx.items = saved;
 }
 
 /// A `let name = <closure>;` statement whose body references `name`.
@@ -193,10 +187,6 @@ pub(crate) fn pat_ident(pat: &Pat) -> Option<&Ident> {
     }
 }
 
-pub(crate) fn role_ident(n: usize, role: &str) -> Ident {
-    format_ident!("__rec_{}_{}", n, role)
-}
-
 /// The user closure body with self references rewritten and nested recursive
 /// closures expanded. Failures inside nested expansions are parked in
 /// `ctx.errors` and reported at the end; the body is still returned so the
@@ -206,6 +196,6 @@ pub(crate) fn prepare_body(
 ) -> Expr {
     let mut body = *closure.body.clone();
     replace_self_ref(&mut body, name, self_id);
-    ctx.expand_expr_blocks(&mut body);
+    ctx.expand_body(closure, &mut body);
     body
 }

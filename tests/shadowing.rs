@@ -7,9 +7,6 @@
 //! braces (a brace-less `-> T expr` body is a syntax error), so the lint
 //! cannot be satisfied by rewriting the code.
 #![allow(unused_braces)]
-// `non_upper_case_globals`: shadowing the recursive name requires a
-// same-named lowercase `const`/`static`, which is the point of those tests.
-#![allow(non_upper_case_globals)]
 
 use rec_closure::rec_closure;
 
@@ -41,7 +38,7 @@ fn capture_before_local_shadow() {
     let f = |n: i32| -> i32 {
         let y = x;
         let x = 2;
-        y + n + x
+        if n == 0 { y + x } else { f(n - 1) + n }
     };
     assert_eq!(f(1), 13); // 10 + 1 + 2
     assert_eq!(x, 10);
@@ -54,7 +51,7 @@ fn local_shadow_without_capture() {
     // and the closure lowers to a `fn`; the shadow still works inside it.
     let f = |n: i32| -> i32 {
         let x = 2;
-        x + n
+        if n == 0 { x } else { f(n - 1) + n }
     };
     assert_eq!(f(1), 3);
 }
@@ -68,7 +65,7 @@ fn let_self_init_captures() {
     let x = 10;
     let f = |n: i32| -> i32 {
         let x = x;
-        x + n
+        if n == 0 { x } else { f(n - 1) + n }
     };
     assert_eq!(f(1), 11);
     assert_eq!(x, 10);
@@ -309,38 +306,4 @@ fn match_guard_binding_shadow() {
         }
     };
     assert_eq!(f(3), 3); // arm binding: f = n = 3
-}
-
-#[rec_closure]
-#[test]
-fn const_item_shadows_recursive_name() {
-    // A `const f` shadows the recursive name from its statement onward.
-    let base = 1;
-    let f = |n: i32| -> i32 {
-        if n <= 0 {
-            base
-        } else {
-            let y = f(n - 1) + n;
-            const f: i32 = 3;
-            y + f
-        }
-    };
-    // f(0)=1, f(1)=(1+1)+3=5
-    assert_eq!(f(1), 5);
-}
-
-#[rec_closure]
-#[test]
-fn static_item_shadows_recursive_name() {
-    let base = 1;
-    let f = |n: i32| -> i32 {
-        if n <= 0 {
-            base
-        } else {
-            let y = f(n - 1) + n;
-            static f: i32 = 4;
-            y + f
-        }
-    };
-    assert_eq!(f(1), 6); // (1+1)+4
 }

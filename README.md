@@ -21,6 +21,14 @@ are covered by `cargo test` (`tests/basic.rs`, `tests/nesting.rs`,
 `let name = <closure>;` bindings whose bodies reference `name`, and rewrites
 them into recursive closures.
 
+Only bare closure initializers opt in. An unshadowed reference to the
+closure's binding name denotes recursive self, even when an older binding
+has that name. Inner bindings retain their lexical scope.
+
+The attribute applies to any `fn` item with a body: free functions,
+associated functions, and `impl`/trait methods with a default body. A
+method's `self` is captured like any other outer binding.
+
 ### Basic: zero annotations, no capture
 
 ```rust
@@ -66,8 +74,9 @@ fn main() {
 
 ### Fully annotated: zero-allocation path
 
-When every parameter and the return type are annotated, the macro expands to
-a `fix_fn`-style scheme (no heap allocation, no reference counting):
+When every parameter and the return type are annotated with types that can
+be used in local items, the macro can avoid heap allocation and reference
+counting (a plain `fn` without captures, or a `fix_fn`-style scheme with them):
 
 ```rust
 #[rec_closure]
@@ -112,21 +121,31 @@ fn main() {
 
 | user annotations | expansion | per-recursion cost |
 |---|---|---|
-| complete, no captures | plain local `fn` | none (static call) |
-| complete, captures, non-reference return | `&dyn HideFn` self-param (see `examples/typed.rs`) | one dyn dispatch, zero alloc |
-| reference return (or none/partial) | `Rc + OnceCell + Weak` (see `examples/optimized.rs`) | `get` + `upgrade` + dyn dispatch |
+| complete, item-compatible, proven capture-free | plain local `fn` | none (static call) |
+| complete, item-compatible, captures, no elided return references | `&dyn HideFn` self-param (see `examples/typed.rs`) | one dyn dispatch, zero alloc |
+| none/partial, `_` holes, outer generics, or reference-return fallback | `Rc + OnceCell + Weak` (see `examples/optimized.rs`) | `get` + `upgrade` + dyn dispatch |
 
 "Captures" means uses of ordinary local variables. `fn`/`const`/`static`
-items *nested inside the annotated `fn`* are pre-scanned and never counted
-as captures: a fully annotated closure that calls such an item (or reads
+items *nested inside the annotated `fn`* are pre-scanned for their entire
+block and are not counted as captures unless a local binding shadows them.
+A fully annotated closure that calls such an item (or reads
 its `const`) takes the capture-free path, so the plain-`fn` lowering stays
 available even when the closure's body calls a helper defined beside it.
+
+Macro invocations and unresolved names (including module-level and prelude
+items) are conservatively treated as possible captures. Type annotations
+remain type constraints; they do not select different name-resolution rules.
+Signatures or bodies referring to outer generic parameters use the store
+path because generated local items cannot inherit those parameters.
 
 ## Verified expansion shapes
 
 - `examples/optimized.rs` — single-threaded inferred path
 - `examples/sync.rs` — multithreaded inferred path
 - `examples/typed.rs` — zero-allocation typed path
+
+`examples/nested.rs` and `examples/splat0.rs`–`splat2.rs` are hand-unrolled
+lowerings kept for reference; they do not use the macro.
 
 ## Limitations
 
@@ -154,15 +173,16 @@ available even when the closure's body calls a helper defined beside it.
   capture-free lowering. Shadowing such an item's name *inside* the closure
   body is still honored by the rewrite's scope tracking.
 - The recursive closure must be a bare initializer: `let f = |n| ...;`.
-  Parenthesized forms (`let f = (|n| ...);`) are not recognized — the
-  supported syntax is deliberately just the native closure binding.
+  Parentheses, blocks, and calls such as `wrap(|n| ...)` are deliberately
+  outside recognition. They retain ordinary Rust name resolution.
 - The rewrite of the recursive name is scope-aware but syntactic: references
   that resolve to an inner binding shadowing the recursive name (including
   `let` chains, `const`/`static`/`fn` items, match arms, and nested closure
   parameters) are left untouched, and nested `fn` items are never rewritten.
   Names produced by other macros inside the body are invisible to the
   analysis (syn treats macro tokens as opaque), so a recursive call inside
-  `vec![f(x)]` is not detected.
+  `vec![f(x)]` is not detected. Import aliases and names introduced by other
+  macros are not resolved for shadowing; avoid collisions with recursive names.
 - A turbofish self-reference (`fact::<i32>(...)`) is recognized as recursion,
   but cannot compile: the generated fn/closure has no generic parameters, and
   a native closure would fail the same way.

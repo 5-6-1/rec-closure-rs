@@ -9,8 +9,11 @@ use syn::{
 use crate::{
     Ctx,
     analysis::captures_external,
-    pat_ident, prepare_body, role_ident,
+    names::arguments,
+    prepare_body, role_ident,
+    signature::needs_inference,
     store::{DynStore, erased_params},
+    validate::reject_nested_name,
     zero_alloc::expand_zero_alloc,
 };
 
@@ -25,13 +28,13 @@ pub(crate) struct TypedArgs {
     pub(crate) pats: Vec<Pat>,
     /// Parameter types.
     pub(crate) tys: Vec<Type>,
-    /// Parameter identifiers.
+    /// Fresh forwarding identifiers; user patterns stay on the inner closure.
     pub(crate) names: Vec<Ident>,
     /// Return type.
     pub(crate) ret: Type,
 }
 
-fn typed_args(closure: &ExprClosure) -> Option<TypedArgs> {
+fn typed_args(closure: &ExprClosure, n: usize) -> Option<TypedArgs> {
     let (pats, tys): (Vec<Pat>, Vec<Type>) = closure
         .inputs
         .iter()
@@ -42,7 +45,7 @@ fn typed_args(closure: &ExprClosure) -> Option<TypedArgs> {
         .collect::<Option<Vec<(Pat, Type)>>>()?
         .into_iter()
         .unzip();
-    let names: Vec<Ident> = pats.iter().map(|p| pat_ident(p).cloned()).collect::<Option<_>>()?;
+    let names = arguments(n, pats.len());
     let ret = match &closure.output {
         ReturnType::Type(_, ty) => (**ty).clone(),
         ReturnType::Default => return None,
@@ -146,26 +149,18 @@ impl<'a> Visit<'a> for AnyRefFinder {
 pub(crate) fn expand_closure(
     name: &Ident, closure: &ExprClosure, ctx: &mut Ctx,
 ) -> syn::Result<Vec<Stmt>> {
+    while ctx.reserved.contains(&ctx.counter) {
+        ctx.counter += 1;
+    }
     let n = ctx.counter;
     ctx.counter += 1;
 
-    // A nested recursive closure with the same name would make the rewrite
-    // drift between expansion paths (its body's `name` is either the outer
-    // self or the inner fn, depending on the path) — refuse loudly instead
-    // of silently changing behavior.
-    if ctx.active.iter().any(|a| a == name) {
-        return Err(syn::Error::new_spanned(
-            closure,
-            "a nested recursive closure cannot reuse the name of an enclosing \
-             recursive closure; rename one of them",
-        ));
-    }
+    reject_nested_name(closure, name)?;
     if closure.asyncness.is_some() {
         return Err(syn::Error::new_spanned(closure, "async recursive closures are not supported"));
     }
 
-    ctx.active.push(name.clone());
-    let result = match typed_args(closure) {
+    match typed_args(closure, n).filter(|_| !needs_inference(closure, &ctx.generics)) {
         Some(ta) => match ret_elided_ref(&ta.ret) {
             // Container-nested elided references (`Option<&str>`) cannot be
             // expressed by any expansion path (zero-alloc: E0106 in the `Fn`
@@ -205,9 +200,7 @@ pub(crate) fn expand_closure(
             }
         },
         None => Ok(expand_inferred(name, closure, n, ctx)),
-    };
-    ctx.active.pop();
-    result
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -220,7 +213,7 @@ fn expand_fn(name: &Ident, closure: &ExprClosure, ta: &TypedArgs, ctx: &mut Ctx)
     // The body keeps referencing `name`; inside the `fn` that is the
     // recursion. Only nested recursive closures need expansion.
     let mut body = *closure.body.clone();
-    ctx.expand_expr_blocks(&mut body);
+    ctx.expand_body(closure, &mut body);
     // Keep the `let name = ...` shape of every path; the fn lives inside the
     // block (so only the variable occupies the outer scope) and the tail
     // `name` refers to the fn item.
@@ -240,8 +233,9 @@ fn expand_fn(name: &Ident, closure: &ExprClosure, ta: &TypedArgs, ctx: &mut Ctx)
 
 fn expand_inferred(name: &Ident, closure: &ExprClosure, n: usize, ctx: &mut Ctx) -> Vec<Stmt> {
     let mov = closure.capture;
+    let output = &closure.output;
     let params: Vec<Pat> = closure.inputs.iter().cloned().collect();
-    let (param_tys, for_clause) = erased_params(&closure.inputs);
+    let (param_tys, for_clause) = erased_params(&closure.inputs, n);
     let store = DynStore::new(ctx.sync, &param_tys, &for_clause);
     let DynStore { rc, weak_mod, cell_ty, cell_new, self_ty, dyn_ty } = &store;
 
@@ -254,12 +248,9 @@ fn expand_inferred(name: &Ident, closure: &ExprClosure, n: usize, ctx: &mut Ctx)
 
     let body = prepare_body(closure, name, &self_id, ctx);
 
-    // Bind `name` to a wrapper closure (capturing the `Rc`) whenever every
-    // parameter is a simple identifier: `Rc<{closure}>` itself does not
-    // implement `Fn`, so a plain binding could not be returned or passed as
-    // a trait object. With non-identifier patterns the wrapper cannot be
-    // built, so fall back to binding the `Rc` directly (usable in place,
-    // not returnable).
+    // Always expose a real closure: Rc<F> is callable through deref but does
+    // not implement Fn. Fresh forwarding arguments support destructuring
+    // and wildcard patterns without repeating the user's binding pattern.
     //
     // The wrapper inherits the user's `move`: a non-`move` `rec` borrows the
     // block-local `slot_ref`, so folding the scaffolding into a block or
@@ -267,13 +258,8 @@ fn expand_inferred(name: &Ident, closure: &ExprClosure, n: usize, ctx: &mut Ctx)
     // enclosing fn therefore requires the user's `move` — same rule as for a
     // native closure. Stable Rust has no per-variable capture modes, so this
     // is not fixable in the macro.
-    let args: Vec<Ident> = params.iter().filter_map(pat_ident).cloned().collect();
-    let name_stmt = if args.len() == params.len() {
-        // Wrapper without the user's `mut` (the body never mutates them).
-        parse_quote! { let #name = #mov |#(#args),*| #rec(#(#args),*); }
-    } else {
-        parse_quote! { let #name = #rec; }
-    };
+    let args = arguments(n, params.len());
+    let name_stmt = parse_quote! { let #name = #mov |#(#args),*| #rec(#(#args),*); };
 
     vec![
         parse_quote! {
@@ -282,7 +268,7 @@ fn expand_inferred(name: &Ident, closure: &ExprClosure, n: usize, ctx: &mut Ctx)
         },
         parse_quote! { let #slot_ref = #rc::clone(&#slot); },
         parse_quote! {
-            let #rec = #rc::new(#mov |#(#params),*| {
+            let #rec = #rc::new(#mov |#(#params),*| #output {
                 let #strong = #slot_ref.get()
                     .expect("rec_closure: recursion slot never initialized")
                     .upgrade()

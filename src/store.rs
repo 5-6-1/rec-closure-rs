@@ -29,7 +29,7 @@ impl DynStore {
         } else {
             quote! {}
         };
-        let sig = quote! { #for_clause Fn(#(#param_tys),*) -> _ #extra };
+        let sig = quote! { #for_clause ::core::ops::Fn(#(#param_tys),*) -> _ #extra };
         let (rc, weak_mod, cell_ty, cell_new) = if sync {
             (
                 quote! { ::std::sync::Arc },
@@ -56,15 +56,16 @@ impl DynStore {
     }
 }
 
-/// The erased parameter types for the inferred store. Annotated reference
-/// types become `&'L ...` bound by fresh higher-ranked lifetimes, recursively
+/// The erased parameter types for the inferred store. Elided reference
+/// lifetimes become `&'L ...` bound by fresh higher-ranked lifetimes, recursively
 /// (so `Vec<&mut T>` and `Option<&T>` work too); everything else is either
-/// the annotated type or a `_` hole. Returns the parameter types and the
-/// `for<...>` clause (empty when no references were lifted).
+/// the annotated type or a `_` hole. Explicit lifetimes remain unchanged.
+/// Returns the parameter types and the `for<...>` clause (empty when no
+/// references were lifted).
 pub(crate) fn erased_params(
-    inputs: &Punctuated<Pat, Token![,]>,
+    inputs: &Punctuated<Pat, Token![,]>, family: usize,
 ) -> (Vec<TokenStream2>, TokenStream2) {
-    let mut lift = LiftRefs { lifetimes: Vec::new(), counter: 0 };
+    let mut lift = LiftRefs { lifetimes: Vec::new(), counter: 0, family };
     let param_tys = inputs
         .iter()
         .map(|pat| match pat {
@@ -85,7 +86,7 @@ pub(crate) fn erased_params(
     (param_tys, for_clause)
 }
 
-/// Replaces every reference nested in a type with a fresh anonymous
+/// Replaces elided references nested in a type with fresh anonymous
 /// higher-ranked lifetime; the collected binders form the `for<...>` clause.
 /// Traversing with `VisitMut` covers every type shape uniformly (paths,
 /// tuples, slices, arrays, pointers, trait objects, ...), including shapes a
@@ -93,14 +94,23 @@ pub(crate) fn erased_params(
 struct LiftRefs {
     lifetimes: Vec<Lifetime>,
     counter: usize,
+    family: usize,
 }
 
 impl VisitMut for LiftRefs {
     fn visit_type_reference_mut(&mut self, ty: &mut syn::TypeReference) {
         visit_mut::visit_type_reference_mut(self, ty);
+        // Named lifetimes express a user constraint (including `'static`),
+        // not a borrow that may vary independently on every recursive call.
+        if ty.lifetime.as_ref().is_some_and(|lt| lt.ident != "_") {
+            return;
+        }
         // `__rec_` prefix keeps generated lifetimes out of the user's
         // namespace, consistent with the `__rec_{N}_{role}` identifiers.
-        let lt = Lifetime::new(&format!("'__rec_a{}", self.counter), Span::call_site());
+        let lt = Lifetime::new(
+            &format!("'__rec_{}_lt{}", self.family, self.counter),
+            Span::mixed_site(),
+        );
         self.counter += 1;
         self.lifetimes.push(lt.clone());
         ty.lifetime = Some(lt);
@@ -125,7 +135,7 @@ mod tests {
     /// collected fresh lifetime names.
     fn lifted(input: &str) -> (String, Vec<String>) {
         let ty: Type = parse_str(input).unwrap();
-        let mut lift = LiftRefs { lifetimes: Vec::new(), counter: 0 };
+        let mut lift = LiftRefs { lifetimes: Vec::new(), counter: 0, family: 0 };
         let mut t = ty;
         lift.visit_type_mut(&mut t);
         let names = lift.lifetimes.iter().map(|l| l.ident.to_string()).collect();
@@ -135,15 +145,15 @@ mod tests {
     #[test]
     fn lifts_single_ref() {
         let (out, lts) = lifted("&str");
-        assert!(out.contains("& '__rec_a0 str"), "out: {out}");
-        assert_eq!(lts, ["__rec_a0"]);
+        assert!(out.contains("& '__rec_0_lt0 str"), "out: {out}");
+        assert_eq!(lts, ["__rec_0_lt0"]);
     }
 
     #[test]
     fn lifts_ref_inside_container() {
         let (out, lts) = lifted("Vec<&mut i32>");
-        assert!(out.contains("& '__rec_a0 mut i32"), "out: {out}");
-        assert_eq!(lts, ["__rec_a0"]);
+        assert!(out.contains("& '__rec_0_lt0 mut i32"), "out: {out}");
+        assert_eq!(lts, ["__rec_0_lt0"]);
     }
 
     #[test]
@@ -151,14 +161,14 @@ mod tests {
         // Recursion visits the inner reference first, so the outer one gets
         // the later lifetime.
         let (out, lts) = lifted("&(&str)");
-        assert!(out.contains("& '__rec_a1 (& '__rec_a0 str)"), "out: {out}");
-        assert_eq!(lts, ["__rec_a0", "__rec_a1"]);
+        assert!(out.contains("& '__rec_0_lt1 (& '__rec_0_lt0 str)"), "out: {out}");
+        assert_eq!(lts, ["__rec_0_lt0", "__rec_0_lt1"]);
     }
 
     #[test]
     fn lifts_multiple_refs_in_generic_args() {
         let (_, lts) = lifted("Result<&str, &mut [u8]>");
-        assert_eq!(lts, ["__rec_a0", "__rec_a1"]);
+        assert_eq!(lts, ["__rec_0_lt0", "__rec_0_lt1"]);
     }
 
     #[test]

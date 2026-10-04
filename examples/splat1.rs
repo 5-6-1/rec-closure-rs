@@ -17,7 +17,7 @@ fn main() {
 
         *slot.borrow_mut() = Some(rec.clone());
 
-        // 返回一个捕获 slot 强引用的闭包
+        // Return a closure holding a strong reference to the slot.
         let slot_for_call = ::std::rc::Rc::clone(&slot);
         move |n| {
             let rec = slot_for_call.borrow().as_ref().unwrap().clone();

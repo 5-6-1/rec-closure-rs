@@ -34,6 +34,25 @@ enforced: a change that violates them is rejected in review.
 - Structured errors in the macro use `syn::Error`; diagnostics are collected
   (`Ctx::errors`) so one bad closure does not hide the others.
 - Do not add `anyhow`.
+- Report user-input failures with diagnostics at user token spans; do not
+  introduce panic-based validation.
+
+## Architecture and development records
+
+- Keep user-facing usage in the README and design decisions, implementation
+  notes, and validation in `docs/dev-changelog.md`. Do not create a separate
+  syntax specification for these development records.
+- Binding predicates live in `scope.rs`; recursive-name detection and
+  replacement share the traversal in `replace.rs`. Keep one source of
+  truth instead of adding parallel name-resolution implementations.
+- Type information enables optimization. Name resolution must agree across
+  the function, zero-allocation, and inferred-store paths.
+- Record changes under `Unreleased` in both `CHANGELOG.md` and
+  `docs/dev-changelog.md`. For a numbered release, first check crates.io and
+  GitHub releases/tags and choose the next appropriate version; never assign
+  new changes to an already published version.
+- Use direct file edits for literals; do not use PowerShell text replacement
+  or batch-writing scripts to modify sources.
 
 ## Tests
 
@@ -53,6 +72,8 @@ cargo fmt --all --check
 cargo check --all-targets
 cargo clippy --all-targets -- -D warnings
 cargo test
+cargo test --doc
+cargo doc --no-deps
 cargo run --example optimized
 cargo run --example sync
 cargo run --example nested
@@ -86,9 +107,10 @@ always comment it.
 
 ## Continuous integration
 
-- `.github/workflows/ci.yml` enforces `cargo fmt --check`, clippy with
-  `-D warnings`, `cargo test`, and the 350-line file limit on every push /
-  pull request. A change that breaks CI is **hard** rejected.
+- `.github/workflows/ci.yml` enforces formatting, all-target checking, Clippy
+  with `-D warnings`, tests, warning-denied documentation, examples, and the
+  350-line file limit on every push / pull request. A change that breaks CI
+  is **hard** rejected.
 
 ## Optional pre-commit hook
 

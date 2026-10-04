@@ -1,6 +1,5 @@
-//! Capture analysis and shadowing predicates. Recursion detection lives in
-//! `detect.rs`; this module answers "does the closure capture anything
-//! external" and provides the binding predicates both analyses share.
+//! Conservative capture analysis. Binding predicates live in `scope.rs`;
+//! recursive name detection and replacement share `replace.rs`.
 
 use proc_macro2::Ident;
 use std::collections::HashSet;
@@ -9,20 +8,20 @@ use syn::{
     visit::{self, Visit},
 };
 
-use crate::pat_ident;
+use crate::scope::{block_items, pat_names};
 
-/// The identifier of a single-segment path (`f`, `f::<T>`); multi-segment
-/// paths (`a::f`) never denote a local binding.
-pub(crate) fn single_ident(path: &syn::Path) -> Option<&Ident> {
-    (path.segments.len() == 1).then(|| &path.segments[0].ident)
-}
-
-/// Heuristic whitelist of standard constructors / built-ins that never denote
-/// a captured variable. Not exhaustive; an unrecognized constructor only
-/// matters if the user shadows it with a same-named variable, which is
-/// pathological (the scan then errs safe: counts as a capture).
-fn is_known_ctor(id: &Ident) -> bool {
-    matches!(id.to_string().as_str(), "Some" | "None" | "Ok" | "Err")
+/// Only unqualified single-segment paths (`f`, `f::<T>`) can name a local.
+/// Associated paths (`<T>::f`) and absolute paths are never recursive self.
+pub(crate) fn single_ident(expr: &syn::ExprPath) -> Option<&Ident> {
+    expr.path
+        .segments
+        .first()
+        .filter(|_| {
+            expr.qself.is_none()
+                && expr.path.leading_colon.is_none()
+                && expr.path.segments.len() == 1
+        })
+        .map(|segment| &segment.ident)
 }
 
 // ---------------------------------------------------------------------------
@@ -37,7 +36,7 @@ pub(crate) fn captures_external(
     closure: &ExprClosure, self_name: &Ident, outer_items: &HashSet<Ident>,
 ) -> bool {
     let mut bound: HashSet<Ident> = outer_items.clone();
-    bound.extend(closure.inputs.iter().filter_map(pat_ident).cloned());
+    bound.extend(closure.inputs.iter().flat_map(pat_names));
     bound.insert(self_name.clone());
     let mut v = CaptureScanner { bound: &mut bound, found: false };
     v.visit_expr(&closure.body);
@@ -54,9 +53,8 @@ struct CaptureScanner<'a> {
 
 impl<'a> Visit<'a> for CaptureScanner<'a> {
     fn visit_expr_path(&mut self, p: &'a syn::ExprPath) {
-        if let Some(id) = single_ident(&p.path)
+        if let Some(id) = single_ident(p)
             && !self.bound.contains(id)
-            && !is_known_ctor(id)
         {
             self.found = true;
         }
@@ -64,14 +62,19 @@ impl<'a> Visit<'a> for CaptureScanner<'a> {
     }
 
     fn visit_pat(&mut self, pat: &'a Pat) {
-        if let Pat::Ident(pi) = pat {
-            self.bound.insert(pi.ident.clone());
-        }
+        self.bound.extend(pat_names(pat));
         visit::visit_pat(self, pat);
+    }
+
+    fn visit_macro(&mut self, _: &'a syn::Macro) {
+        // Opaque tokens may capture local values. Never infer capture-free
+        // merely because their expanded expressions are unavailable here.
+        self.found = true;
     }
 
     fn visit_block(&mut self, block: &'a syn::Block) {
         let saved = self.bound.clone();
+        self.bound.extend(block_items(&block.stmts));
         visit::visit_block(self, block);
         *self.bound = saved;
     }
@@ -80,6 +83,9 @@ impl<'a> Visit<'a> for CaptureScanner<'a> {
         // `let x = x;` reads the *outer* `x` on the right.
         if let Some(init) = &local.init {
             self.visit_expr(&init.expr);
+            if let Some((_, diverge)) = &init.diverge {
+                self.visit_expr(diverge);
+            }
         }
         self.visit_pat(&local.pat);
     }
@@ -141,50 +147,6 @@ impl<'a> Visit<'a> for CaptureScanner<'a> {
         *self.bound = saved;
     }
 
-    fn visit_item_fn(&mut self, node: &'a syn::ItemFn) {
-        // A nested `fn` cannot capture; its bindings are scoped inside it.
-        let saved = self.bound.clone();
-        visit::visit_item_fn(self, node);
-        *self.bound = saved;
-    }
-}
-
-// ---------------------------------------------------------------------------
-// shadowing predicates
-// ---------------------------------------------------------------------------
-
-/// Whether `pat` introduces a binding of `name` anywhere inside it (`f`,
-/// `mut f`, `Some(f)`, `(f, _)`, `[f, ..]`, `f @ _`, `ref f`, `f: T`, ...).
-/// A syn 3 match guard (`Pat::Guard`) binds through its inner pattern.
-pub(crate) fn pat_binds_name(pat: &Pat, name: &Ident) -> bool {
-    let mut v = PatBinder { name, found: false };
-    v.visit_pat(pat);
-    v.found
-}
-
-struct PatBinder<'a> {
-    name: &'a Ident,
-    found: bool,
-}
-
-impl<'a> Visit<'a> for PatBinder<'a> {
-    fn visit_pat(&mut self, pat: &'a Pat) {
-        if let Pat::Ident(p) = pat
-            && p.ident == *self.name
-        {
-            self.found = true;
-        }
-        visit::visit_pat(self, pat);
-    }
-}
-
-/// Whether a nested item binds `name` in the value namespace (`const f`,
-/// `static f`, `fn f`), shadowing the recursive name from that point on.
-pub(crate) fn item_binds_name(item: &Item, name: &Ident) -> bool {
-    match item {
-        Item::Const(c) => c.ident == *name,
-        Item::Static(s) => s.ident == *name,
-        Item::Fn(f) => f.sig.ident == *name,
-        _ => false,
-    }
+    // Items cannot capture their enclosing environment.
+    fn visit_item(&mut self, _: &'a Item) {}
 }

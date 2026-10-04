@@ -5,7 +5,7 @@ use proc_macro2::{Ident, TokenStream as TokenStream2};
 use quote::quote;
 use syn::{ExprClosure, Stmt, parse_quote};
 
-use crate::{Ctx, prepare_body, role_ident};
+use crate::{Ctx, names::type_ident, prepare_body, role_ident};
 
 use super::expand::TypedArgs;
 
@@ -29,23 +29,27 @@ pub(crate) fn expand_zero_alloc(
     let self_param = role_ident(n, "self_param");
     let self_id = role_ident(n, "self");
     let inner = role_ident(n, "inner");
+    let trait_name = type_ident(n, "HideFn");
+    let impl_name = type_ident(n, "HideFnImpl");
+    let callable = type_ident(n, "Callable");
 
     let body = prepare_body(closure, name, &self_id, ctx);
     let (trait_extra, f_extra) = sync_bounds(ctx.sync);
 
     let block = quote! {
         {
-            trait HideFn #trait_extra {
+            trait #trait_name #trait_extra {
                 fn call(&self, #(#names: #tys),*) -> #ret;
             }
-            struct HideFnImpl<F: Fn(&dyn HideFn, #(#tys),*) -> #ret #f_extra>(F);
-            impl<F: Fn(&dyn HideFn, #(#tys),*) -> #ret #f_extra> HideFn for HideFnImpl<F> {
+            struct #impl_name<#callable: ::core::ops::Fn(&dyn #trait_name, #(#tys),*) -> #ret #f_extra>(#callable);
+            impl<#callable: ::core::ops::Fn(&dyn #trait_name, #(#tys),*) -> #ret #f_extra>
+                #trait_name for #impl_name<#callable> {
                 #[inline]
                 fn call(&self, #(#names: #tys),*) -> #ret {
                     self.0(self, #(#names),*)
                 }
             }
-            let #inner = HideFnImpl(#mov |#self_param, #(#pats: #tys),*| -> #ret {
+            let #inner = #impl_name(#mov |#self_param, #(#pats: #tys),*| -> #ret {
                 let #self_id = |#(#names: #tys),*| #self_param.call(#(#names),*);
                 #body
             });
